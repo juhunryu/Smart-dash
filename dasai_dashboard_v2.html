@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#000000" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>Mochi Daily Dashboard v2</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+    body, html {
+      width: 100%; height: 100%;
+      background-color: #000000;
+      color: #00f0ff;
+      overflow: hidden;
+      font-family: 'Courier New', Courier, monospace;
+    }
+    #app-container {
+      position: relative;
+      width: 100%; height: 100%;
+      transition: transform 2s ease-in-out, opacity 1.5s ease-in-out;
+      opacity: 1;
+    }
+    /* 야간 자동 디밍 모드 */
+    #app-container.night-dim {
+      opacity: 0.42;
+    }
+    canvas {
+      display: block;
+      width: 100%; height: 100%;
+    }
+    /* 상단 데일리보드 */
+    #top-board {
+      position: absolute; top: 20px; left: 28px; right: 28px;
+      display: flex; justify-content: space-between; align-items: flex-start;
+      pointer-events: none;
+      transition: opacity 0.4s ease;
+    }
+    #clock-box .time {
+      font-size: clamp(2rem, 5vw, 3.2rem);
+      font-weight: bold;
+      letter-spacing: 2px;
+      text-shadow: 0 0 12px currentColor;
+    }
+    #clock-box .date {
+      font-size: clamp(0.85rem, 2vw, 1.1rem);
+      opacity: 0.75;
+      margin-top: 4px;
+    }
+    #status-box {
+      text-align: right;
+      font-size: clamp(0.9rem, 2.2vw, 1.2rem);
+      line-height: 1.5;
+    }
+    #weather-info { text-shadow: 0 0 8px currentColor; }
+    #battery-info { opacity: 0.75; font-size: 0.9em; }
+
+    /* 하단 미니 대시보드 */
+    #bottom-board {
+      position: absolute; bottom: 18px; left: 28px; right: 28px;
+      display: flex; justify-content: space-between; align-items: center;
+      font-size: clamp(0.8rem, 1.8vw, 1rem);
+      opacity: 0.65;
+      transition: opacity 0.4s ease;
+    }
+    .badge-group {
+      display: flex; gap: 8px; align-items: center;
+    }
+    .badge {
+      border: 1px solid currentColor;
+      padding: 3px 8px;
+      border-radius: 4px;
+      pointer-events: auto;
+      cursor: pointer;
+    }
+
+    /* 시작 오버레이 */
+    #start-overlay {
+      position: fixed; inset: 0;
+      background: rgba(0, 0, 0, 0.92);
+      color: #00f0ff;
+      display: flex; flex-direction: column;
+      justify-content: center; align-items: center;
+      text-align: center; z-index: 20; cursor: pointer;
+      padding: 20px;
+    }
+    #start-overlay h1 { font-size: 1.5rem; margin-bottom: 12px; }
+    #start-overlay p { font-size: 0.9rem; color: #888; line-height: 1.6; }
+  </style>
+</head>
+<body>
+
+<div id="start-overlay">
+  <h1>[ MOCHI DAILY DASHBOARD v2 ]</h1>
+  <p>화면을 터치하면 대시보드가 시작됩니다.<br>(시계 · 날씨 · 배터리 · 자동 야간 밝기 · 졸린 눈 모드)</p>
+</div>
+
+<div id="app-container">
+  <div id="top-board">
+    <div id="clock-box">
+      <div class="time" id="time-display">00:00:00</div>
+      <div class="date" id="date-display">2026.01.01 (THU)</div>
+    </div>
+    <div id="status-box">
+      <div id="weather-info">날씨 불러오는 중...</div>
+      <div id="battery-info">BAT: --%</div>
+    </div>
+  </div>
+
+  <canvas id="canvas"></canvas>
+
+  <div id="bottom-board">
+    <div class="badge-group">
+      <div class="badge" id="mood-badge">STATE: IDLE</div>
+      <div class="badge" id="dim-toggle">BRIGHT: AUTO</div>
+    </div>
+    <div id="sensor-hud">SPD: 0 km/h | MIC: 0</div>
+  </div>
+</div>
+
+<script>
+const container = document.getElementById('app-container');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const overlay = document.getElementById('start-overlay');
+
+const timeEl = document.getElementById('time-display');
+const dateEl = document.getElementById('date-display');
+const weatherEl = document.getElementById('weather-info');
+const batteryEl = document.getElementById('battery-info');
+const moodBadge = document.getElementById('mood-badge');
+const dimToggle = document.getElementById('dim-toggle');
+const sensorHud = document.getElementById('sensor-hud');
+
+let width, height;
+function resize() {
+  width = canvas.width = window.innerWidth;
+  height = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+const state = {
+  mood: 'IDLE',
+  moodTimer: 0,
+  eyeColor: '#00f0ff',
+  blink: 0,
+  lookX: 0, lookY: 0,
+  audioLevel: 0,
+  speedKmh: 0,
+  lastHeading: null,
+  dashboardVisible: true,
+  dimMode: 'AUTO', // 'AUTO', 'DAY', 'NIGHT'
+  isNightTime: false,
+  isSleepyHour: false
+};
+
+function setThemeColor(color) {
+  state.eyeColor = color;
+  document.body.style.color = color;
+}
+
+function setMood(newMood, duration = 2500) {
+  state.mood = newMood;
+  state.moodTimer = Date.now() + duration;
+  moodBadge.textContent = `STATE: ${newMood}`;
+}
+
+// 밝기 모드 적용
+function applyBrightness() {
+  let shouldDim = false;
+  if (state.dimMode === 'NIGHT') shouldDim = true;
+  else if (state.dimMode === 'DAY') shouldDim = false;
+  else shouldDim = state.isNightTime;
+
+  if (shouldDim) {
+    container.classList.add('night-dim');
+  } else {
+    container.classList.remove('night-dim');
+  }
+}
+
+dimToggle.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const modes = ['AUTO', 'NIGHT', 'DAY'];
+  state.dimMode = modes[(modes.indexOf(state.dimMode) + 1) % modes.length];
+  dimToggle.textContent = `BRIGHT: ${state.dimMode}`;
+  applyBrightness();
+});
+
+// 1. 시작 트리거
+overlay.addEventListener('click', async () => {
+  overlay.style.display = 'none';
+  if (document.documentElement.requestFullscreen) {
+    document.documentElement.requestFullscreen().catch(() => {});
+  }
+  if ('wakeLock' in navigator) {
+    try { await navigator.wakeLock.request('screen'); } catch (e) {}
+  }
+  initAudio();
+  initSensors();
+  initGPSAndWeather();
+  initBattery();
+});
+
+// 2. 실시간 시계 & 야간 시간대 판별
+function updateClock() {
+  const now = new Date();
+  const hour = now.getHours();
+  const hh = String(hour).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  const ss = String(now.getSeconds()).padStart(2, '0');
+  timeEl.textContent = `${hh}:${mm}:${ss}`;
+
+  const days = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+  const yyyy = now.getFullYear();
+  const mon = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  dateEl.textContent = `${yyyy}.${mon}.${dd} (${days[now.getDay()]})`;
+
+  // 19:00 ~ 06:59 야간 자동 디밍 시간대
+  state.isNightTime = (hour >= 19 || hour < 7);
+  // 23:00 ~ 05:59 심야 졸린 눈 시간대
+  state.isSleepyHour = (hour >= 23 || hour < 6);
+  applyBrightness();
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// 3. 배터리 잔량
+async function initBattery() {
+  if ('getBattery' in navigator) {
+    try {
+      const bat = await navigator.getBattery();
+      const updateBat = () => {
+        const pct = Math.round(bat.level * 100);
+        const charging = bat.charging ? '⚡' : '';
+        batteryEl.textContent = `BAT: ${pct}% ${charging}`;
+      };
+      updateBat();
+      bat.addEventListener('levelchange', updateBat);
+      bat.addEventListener('chargingchange', updateBat);
+    } catch (e) {}
+  }
+}
+
+// 4. GPS 속도 + 실시간 날씨
+let weatherFetched = false;
+async function fetchWeather(lat, lon) {
+  try {
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const temp = Math.round(data.current_weather.temperature);
+    const code = data.current_weather.weathercode;
+    
+    let icon = '☀️ 맑음';
+    if (code >= 1 && code <= 3) icon = '⛅ 구름조금';
+    else if (code >= 45 && code <= 48) icon = '🌫️ 안개';
+    else if (code >= 51 && code <= 67) icon = '🌧️ 비';
+    else if (code >= 71 && code <= 77) icon = '❄️ 눈';
+    else if (code >= 80) icon = '⛈️ 소나기';
+
+    weatherEl.textContent = `${icon} ${temp}°C`;
+  } catch (e) {
+    weatherEl.textContent = '날씨 정보 없음';
+  }
+}
+
+function initGPSAndWeather() {
+  if (!('geolocation' in navigator)) return;
+  navigator.geolocation.watchPosition((pos) => {
+    const { latitude, longitude, speed, heading } = pos.coords;
+    if (!weatherFetched) {
+      weatherFetched = true;
+      fetchWeather(latitude, longitude);
+    }
+
+    state.speedKmh = Math.round((speed || 0) * 3.6);
+    if (state.speedKmh >= 70 && (state.mood === 'IDLE' || state.mood === 'SLEEPY')) {
+      setMood('SPEED', 3000);
+    }
+
+    if (heading !== null && state.lastHeading !== null) {
+      let diff = heading - state.lastHeading;
+      if (diff > 180) diff -= 360;
+      if (diff < -180) diff += 360;
+      if (Math.abs(diff) > 15) {
+        state.lookX = Math.max(-40, Math.min(40, diff * 1.5));
+      }
+    }
+    state.lastHeading = heading;
+  }, () => {
+    weatherEl.textContent = 'GPS 권한 필요';
+  }, { enableHighAccuracy: true });
+}
+
+// 5. 소리 & 자이로 반응
+async function initAudio() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaStreamSource(stream);
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    source.connect(analyser);
+
+    const dataArray = new Uint8Array(analyser.frequencyBinCount);
+    function checkAudio() {
+      analyser.getByteFrequencyData(dataArray);
+      let sum = 0;
+      for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+      state.audioLevel = sum / dataArray.length;
+      if (state.audioLevel > 45 && state.mood !== 'SHOCK') {
+        setMood('MUSIC', 1500);
+      }
+      requestAnimationFrame(checkAudio);
+    }
+    checkAudio();
+  } catch (e) {}
+}
+
+function initSensors() {
+  window.addEventListener('devicemotion', (e) => {
+    const acc = e.acceleration || e.accelerationIncludingGravity;
+    if (!acc) return;
+    const force = Math.sqrt((acc.x || 0)**2 + (acc.y || 0)**2 + (acc.z || 0)**2);
+    if (Math.abs(force - 9.8) > 12) {
+      setMood('SHOCK', 2000);
+    }
+  });
+}
+
+// 6. 터치 이벤트
+let touchTimer;
+let lastTap = 0;
+
+canvas.addEventListener('pointerdown', () => {
+  const now = Date.now();
+  if (now - lastTap < 300) {
+    state.dashboardVisible = !state.dashboardVisible;
+    document.getElementById('top-board').style.opacity = state.dashboardVisible ? '1' : '0';
+    document.getElementById('bottom-board').style.opacity = state.dashboardVisible ? '0.65' : '0';
+  }
+  lastTap = now;
+
+  setMood('HAPPY', 2000);
+  touchTimer = setTimeout(() => {
+    const colors = ['#00f0ff', '#ff2a85', '#39ff14', '#ffbe0b', '#ffffff'];
+    const next = colors[(colors.indexOf(state.eyeColor) + 1) % colors.length];
+    setThemeColor(next);
+  }, 800);
+});
+canvas.addEventListener('pointerup', () => clearTimeout(touchTimer));
+
+// 7. 번인 방지 & 자연스러운 움직임
+setInterval(() => {
+  const shiftX = (Math.random() - 0.5) * 14;
+  const shiftY = (Math.random() - 0.5) * 14;
+  container.style.transform = `translate(${shiftX}px, ${shiftY}px)`;
+
+  if (state.mood === 'IDLE' || state.mood === 'SLEEPY') {
+    state.lookX = (Math.random() - 0.5) * (state.mood === 'SLEEPY' ? 10 : 30);
+    state.lookY = (Math.random() - 0.5) * (state.mood === 'SLEEPY' ? 6 : 15);
+    state.blink = 1;
+    setTimeout(() => { state.blink = 0; }, state.mood === 'SLEEPY' ? 350 : 150);
+  }
+}, 4000);
+
+function drawPixelEye(x, y, w, h, radius) {
+  ctx.beginPath();
+  ctx.roundRect(x - w / 2, y - h / 2, w, h, radius);
+  ctx.fill();
+}
+
+// 8. 렌더링 루프
+function render() {
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, width, height);
+
+  // 기분 타이머 만료 시 기본 상태(심야에는 SLEEPY, 주간에는 IDLE)로 복귀
+  if (state.mood !== 'IDLE' && state.mood !== 'SLEEPY' && Date.now() > state.moodTimer) {
+    const defaultMood = state.isSleepyHour ? 'SLEEPY' : 'IDLE';
+    state.mood = defaultMood;
+    moodBadge.textContent = `STATE: ${defaultMood}`;
+  } else if (state.mood === 'IDLE' && state.isSleepyHour) {
+    state.mood = 'SLEEPY';
+    moodBadge.textContent = 'STATE: SLEEPY';
+  } else if (state.mood === 'SLEEPY' && !state.isSleepyHour) {
+    state.mood = 'IDLE';
+    moodBadge.textContent = 'STATE: IDLE';
+  }
+
+  const cx = width / 2 + state.lookX;
+  const cy = height * 0.56 + state.lookY;
+  const eyeGap = Math.min(width, height) * 0.34;
+  const baseW = Math.min(width, height) * 0.20;
+  const baseH = Math.min(width, height) * 0.25;
+
+  ctx.fillStyle = state.eyeColor;
+  ctx.shadowColor = state.eyeColor;
+  ctx.shadowBlur = 18;
+
+  if (state.mood === 'HAPPY') {
+    ctx.lineWidth = 12;
+    ctx.strokeStyle = state.eyeColor;
+    ctx.lineCap = 'round';
+    [-1, 1].forEach(dir => {
+      const ex = cx + dir * eyeGap;
+      ctx.beginPath();
+      ctx.moveTo(ex - baseW * 0.4, cy + 10);
+      ctx.lineTo(ex, cy - baseH * 0.25);
+      ctx.lineTo(ex + baseW * 0.4, cy + 10);
+      ctx.stroke();
+    });
+  } else if (state.mood === 'SHOCK') {
+    const shakeX = (Math.random() - 0.5) * 10;
+    const shakeY = (Math.random() - 0.5) * 10;
+    [-1, 1].forEach(dir => {
+      drawPixelEye(cx + dir * eyeGap + shakeX, cy + shakeY, baseW * 1.15, baseH * 1.15, 35);
+    });
+  } else if (state.mood === 'MUSIC') {
+    const bounce = Math.min(35, state.audioLevel * 0.45);
+    [-1, 1].forEach(dir => {
+      drawPixelEye(cx + dir * eyeGap, cy - bounce * 0.3, baseW, baseH * 0.6 + bounce, 22);
+    });
+  } else if (state.mood === 'SPEED') {
+    ctx.lineWidth = 12;
+    ctx.strokeStyle = state.eyeColor;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(cx - eyeGap - baseW * 0.3, cy - baseH * 0.25);
+    ctx.lineTo(cx - eyeGap + baseW * 0.3, cy);
+    ctx.lineTo(cx - eyeGap - baseW * 0.3, cy + baseH * 0.25);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx + eyeGap + baseW * 0.3, cy - baseH * 0.25);
+    ctx.lineTo(cx + eyeGap - baseW * 0.3, cy);
+    ctx.lineTo(cx + eyeGap + baseW * 0.3, cy + baseH * 0.25);
+    ctx.stroke();
+  } else if (state.mood === 'SLEEPY') {
+    // 심야 졸린 눈 (반쯤 감긴 눈 - -)
+    const sleepyH = state.blink ? 6 : baseH * 0.28;
+    [-1, 1].forEach(dir => {
+      drawPixelEye(cx + dir * eyeGap, cy + 12, baseW * 1.05, sleepyH, 12);
+    });
+    // 우측 눈 옆에 작은 'Zzz' 표시
+    ctx.font = 'bold 20px monospace';
+    const zOffset = Math.sin(Date.now() / 400) * 5;
+    ctx.fillText('zZ', cx + eyeGap + baseW * 0.65, cy - baseH * 0.25 + zOffset);
+  } else {
+    const currentH = state.blink ? 10 : baseH;
+    [-1, 1].forEach(dir => {
+      drawPixelEye(cx + dir * eyeGap, cy, baseW, currentH, 28);
+    });
+  }
+
+  sensorHud.textContent = `SPD: ${state.speedKmh} km/h | MIC: ${Math.round(state.audioLevel)}`;
+  requestAnimationFrame(render);
+}
+
+render();
+</script>
+</body>
+</html>
